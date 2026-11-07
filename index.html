@@ -1,0 +1,248 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worship Night Scanner</title>
+
+<script src="https://unpkg.com/html5-qrcode"></script>
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  background: #f7f4f1;
+  color: #40352f;
+  text-align: center;
+  padding: 20px;
+}
+.container {
+  background: white;
+  max-width: 450px;
+  margin: auto;
+  padding: 22px;
+  border-radius: 18px;
+  box-shadow: 0 3px 15px #0001;
+}
+button {
+  background: #765b4b;
+  color: white;
+  border: none;
+  padding: 13px 20px;
+  border-radius: 10px;
+  margin: 8px;
+  cursor: pointer;
+}
+button:disabled { opacity: .5; }
+#reader { width: 100%; margin-top: 15px; }
+#result {
+  background: #f5f0eb;
+  padding: 14px;
+  margin: 15px 0;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+.success { background: #e2f5e6 !important; color: #17632b; }
+.error { background: #ffe5e5 !important; color: #a00000; }
+input {
+  width: 90%;
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+
+<h2>WORSHIP NIGHT</h2>
+<p>Bandung Tembak Langit</p>
+<h3>Panitia Check-in</h3>
+
+<button id="start" onclick="startScanner()">MULAI SCAN QR</button>
+<button id="stop" onclick="stopScanner()" hidden>STOP SCAN</button>
+
+<div id="reader"></div>
+<div id="result">Scanner siap digunakan.</div>
+
+</div>
+
+<script>
+
+// GANTI DENGAN URL WEB APP APPS SCRIPT KAMU
+const SCRIPT_URL = "PASTE_URL_APPS_SCRIPT_EXEC_DI_SINI";
+
+let scanner = null;
+let processing = false;
+
+function show(message, type = "") {
+  const box = document.getElementById("result");
+  box.textContent = message;
+  box.className = type;
+}
+
+async function startScanner() {
+  if (scanner || processing) return;
+
+  if (typeof Html5Qrcode === "undefined") {
+    show("Library scanner gagal dimuat. Periksa internet.", "error");
+    return;
+  }
+
+  document.getElementById("start").disabled = true;
+  show("Mencari kamera...");
+
+  try {
+    const cameras = await Html5Qrcode.getCameras();
+
+    if (!cameras.length) {
+      throw new Error("Kamera tidak ditemukan.");
+    }
+
+    const camera = cameras.find(c =>
+      /back|rear|environment|belakang/i.test(c.label)
+    ) || cameras[cameras.length - 1];
+
+    scanner = new Html5Qrcode("reader");
+
+    await scanner.start(
+      camera.id,
+      {
+        fps: 10,
+        qrbox: { width: 230, height: 230 }
+      },
+      async (decodedText) => {
+        if (processing) return;
+
+        processing = true;
+        show("QR ditemukan. Memproses check-in...");
+
+        try {
+          await scanner.stop();
+          scanner.clear();
+          scanner = null;
+
+          document.getElementById("stop").hidden = true;
+
+          checkIn(decodedText.trim());
+
+        } catch (error) {
+          show("Gagal menghentikan kamera: " + error, "error");
+          resetScanner();
+        }
+      }
+    );
+
+    document.getElementById("stop").hidden = false;
+    show("Kamera aktif. Arahkan ke QR peserta.");
+
+  } catch (error) {
+    scanner = null;
+    processing = false;
+    document.getElementById("start").disabled = false;
+    show("Gagal membuka kamera: " + error.message, "error");
+  }
+}
+
+function checkIn(token) {
+
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) {
+    show("QR tidak berisi token UUID yang valid.", "error");
+    resetScanner();
+    return;
+  }
+
+  if (!SCRIPT_URL.startsWith("https://script.google.com/")) {
+    show("URL Apps Script belum diisi dengan benar.", "error");
+    resetScanner();
+    return;
+  }
+
+  const callbackName =
+    "wnpCallback" + Date.now();
+
+  let script = document.createElement("script");
+  let finished = false;
+
+  window[callbackName] = function(data) {
+    if (finished) return;
+    finished = true;
+
+    show(
+      data.message,
+      data.success ? "success" : "error"
+    );
+
+    cleanup();
+    resetScanner();
+  };
+
+  function cleanup() {
+    script.remove();
+    delete window[callbackName];
+  }
+
+  script.onerror = function() {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    show("Gagal terhubung ke server Apps Script.", "error");
+    resetScanner();
+  };
+
+  const timeout = setTimeout(function() {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    show("Server tidak merespons. Periksa koneksi internet.", "error");
+    resetScanner();
+  }, 20000);
+
+  function finishCleanup() {
+    clearTimeout(timeout);
+  }
+
+  const oldCallback = window[callbackName];
+  window[callbackName] = function(data) {
+    if (finished) return;
+    finished = true;
+    finishCleanup();
+    show(data.message, data.success ? "success" : "error");
+    cleanup();
+    resetScanner();
+  };
+
+  script.src =
+    SCRIPT_URL +
+    "?api=checkin" +
+    "&token=" + encodeURIComponent(token) +
+    "&callback=" + callbackName;
+
+  document.body.appendChild(script);
+}
+
+function resetScanner() {
+  processing = false;
+  document.getElementById("start").disabled = false;
+}
+
+async function stopScanner() {
+  if (!scanner) return;
+
+  try {
+    await scanner.stop();
+    scanner.clear();
+  } catch (e) {
+    console.log(e);
+  }
+
+  scanner = null;
+  resetScanner();
+  document.getElementById("stop").hidden = true;
+  show("Scanner dihentikan.");
+}
+
+</script>
+</body>
+</html>
